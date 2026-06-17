@@ -1,0 +1,171 @@
+# Data preparation and exploratory analysis
+
+from pathlib import Path
+import os
+import tarfile
+import zipfile
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import requests
+
+from IPython.display import display
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+SEED = 42
+
+DATA_URL = (
+    "https://archive.ics.uci.edu/static/public/401/"
+    "gene+expression+cancer+rna+seq.zip"
+)
+
+DATA_DIR = Path("data")
+OUTPUT_DIR = Path("outputs")
+
+DATA_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def locate_dataset_files(root):
+    data_path = None
+    labels_path = None
+
+    for current_root, _, files in os.walk(root):
+        for filename in files:
+            if filename.lower() == "data.csv":
+                data_path = Path(current_root) / filename
+            elif filename.lower() == "labels.csv":
+                labels_path = Path(current_root) / filename
+
+    return data_path, labels_path
+
+
+data_path, labels_path = locate_dataset_files(DATA_DIR)
+
+if data_path is None or labels_path is None:
+    zip_path = DATA_DIR / "gene_expression_cancer_rna_seq.zip"
+
+    response = requests.get(DATA_URL, timeout=120)
+    response.raise_for_status()
+    zip_path.write_bytes(response.content)
+
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        archive.extractall(DATA_DIR)
+
+    for archive_path in DATA_DIR.rglob("*.tar.gz"):
+        with tarfile.open(archive_path, "r:gz") as archive:
+            archive.extractall(DATA_DIR)
+
+    data_path, labels_path = locate_dataset_files(DATA_DIR)
+
+if data_path is None or labels_path is None:
+    raise FileNotFoundError("data.csv or labels.csv could not be located.")
+
+data = pd.read_csv(data_path)
+labels = pd.read_csv(labels_path)
+
+X = data.drop(columns=[data.columns[0]])
+y = labels["Class"] if "Class" in labels.columns else labels.iloc[:, -1]
+
+print("Expression data:", data.shape)
+print("Labels:", labels.shape)
+print("Samples:", X.shape[0])
+print("Gene-expression features:", X.shape[1])
+print("Cancer classes:", sorted(y.unique()))
+
+display(data.head())
+display(labels.head())
+
+class_distribution = (
+    y.value_counts()
+    .rename_axis("Class")
+    .reset_index(name="Samples")
+)
+
+class_distribution["Percentage"] = (
+    class_distribution["Samples"] / len(y) * 100
+).round(2)
+
+display(class_distribution)
+
+fig, ax = plt.subplots(figsize=(7, 5))
+
+class_distribution.plot(
+    x="Class",
+    y="Samples",
+    kind="bar",
+    legend=False,
+    ax=ax
+)
+
+ax.set_xlabel("Cancer class")
+ax.set_ylabel("Number of samples")
+ax.tick_params(axis="x", rotation=0)
+
+fig.tight_layout()
+fig.savefig(
+    OUTPUT_DIR / "class_distribution.png",
+    dpi=300,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+X_scaled = StandardScaler().fit_transform(X.to_numpy())
+
+pca = PCA(n_components=2, random_state=SEED)
+coordinates = pca.fit_transform(X_scaled)
+
+pca_data = pd.DataFrame(
+    {
+        "PC1": coordinates[:, 0],
+        "PC2": coordinates[:, 1],
+        "Class": y.astype(str).to_numpy()
+    }
+)
+
+pc1 = pca.explained_variance_ratio_[0] * 100
+pc2 = pca.explained_variance_ratio_[1] * 100
+
+print(f"PC1 explained variance: {pc1:.2f}%")
+print(f"PC2 explained variance: {pc2:.2f}%")
+print(f"Combined explained variance: {pc1 + pc2:.2f}%")
+
+fig, ax = plt.subplots(figsize=(7.2, 5.4), dpi=200)
+
+for cancer_class in sorted(pca_data["Class"].unique()):
+    subset = pca_data[pca_data["Class"] == cancer_class]
+
+    ax.scatter(
+        subset["PC1"],
+        subset["PC2"],
+        s=30,
+        alpha=0.75,
+        linewidth=0.25,
+        edgecolor="black",
+        label=cancer_class
+    )
+
+ax.set_xlabel(f"PC1 ({pc1:.2f}% variance)")
+ax.set_ylabel(f"PC2 ({pc2:.2f}% variance)")
+ax.legend(title="Cancer class", frameon=False)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+pca_data.to_csv(
+    OUTPUT_DIR / "pca_coordinates.csv",
+    index=False
+)
+
+fig.savefig(
+    OUTPUT_DIR / "pca_rnaseq_classes.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
