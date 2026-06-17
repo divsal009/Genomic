@@ -1,0 +1,533 @@
+# Results and visualisation
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from IPython.display import display
+from scipy.stats import friedmanchisquare, wilcoxon
+
+from sklearn.metrics import (
+    confusion_matrix,
+    roc_curve,
+    precision_recall_curve,
+    auc
+)
+
+OUTPUT_DIR = Path("outputs")
+
+required_files = [
+    "fold_metrics.csv",
+    "model_summary.csv",
+    "ablation_summary.csv",
+    "robustness_results.csv",
+    "eagle_predictions.npz",
+    "feature_selection_history.npy"
+]
+
+missing_files = [
+    filename
+    for filename in required_files
+    if not (OUTPUT_DIR / filename).exists()
+]
+
+if missing_files:
+    raise FileNotFoundError(
+        "Run the training notebook first. Missing files: "
+        + ", ".join(missing_files)
+    )
+
+fold_metrics = pd.read_csv(
+    OUTPUT_DIR / "fold_metrics.csv"
+)
+
+model_summary = pd.read_csv(
+    OUTPUT_DIR / "model_summary.csv"
+)
+
+ablation_summary = pd.read_csv(
+    OUTPUT_DIR / "ablation_summary.csv"
+)
+
+robustness_results = pd.read_csv(
+    OUTPUT_DIR / "robustness_results.csv"
+)
+
+feature_history = np.load(
+    OUTPUT_DIR / "feature_selection_history.npy"
+)
+
+prediction_data = np.load(
+    OUTPUT_DIR / "eagle_predictions.npz",
+    allow_pickle=True
+)
+
+y_true = prediction_data["y_true"]
+y_prob = prediction_data["y_prob"]
+class_names = prediction_data["class_names"]
+
+display(model_summary.round(4))
+display(ablation_summary.round(4))
+display(robustness_results.round(4))
+
+
+# Comparative weighted F1-score
+
+comparison_data = model_summary.sort_values(
+    "Weighted F1-score Mean",
+    ascending=False
+)
+
+fig, ax = plt.subplots(
+    figsize=(10, 5.5)
+)
+
+ax.bar(
+    comparison_data["Model"],
+    comparison_data["Weighted F1-score Mean"],
+    yerr=comparison_data["Weighted F1-score STD"],
+    capsize=4
+)
+
+ax.set_xlabel("Model")
+ax.set_ylabel("Weighted F1-score")
+ax.set_ylim(0, 1.05)
+ax.tick_params(axis="x", rotation=35)
+
+for label in ax.get_xticklabels():
+    label.set_horizontalalignment("right")
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "weighted_f1_comparison.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# Ablation results
+
+ablation_data = ablation_summary.sort_values(
+    "Weighted F1-score Mean",
+    ascending=False
+)
+
+fig, ax = plt.subplots(
+    figsize=(8, 5)
+)
+
+ax.bar(
+    ablation_data["Model"],
+    ablation_data["Weighted F1-score Mean"],
+    yerr=ablation_data["Weighted F1-score STD"],
+    capsize=4
+)
+
+ax.set_xlabel("Model variant")
+ax.set_ylabel("Weighted F1-score")
+ax.set_ylim(0, 1.05)
+ax.tick_params(axis="x", rotation=25)
+
+for label in ax.get_xticklabels():
+    label.set_horizontalalignment("right")
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "ablation_weighted_f1.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# Confusion matrix
+
+y_pred = np.argmax(
+    y_prob,
+    axis=1
+)
+
+confusion = confusion_matrix(
+    y_true,
+    y_pred
+)
+
+fig, ax = plt.subplots(
+    figsize=(6.5, 5.5)
+)
+
+image = ax.imshow(
+    confusion
+)
+
+ax.set_xticks(
+    np.arange(len(class_names))
+)
+
+ax.set_yticks(
+    np.arange(len(class_names))
+)
+
+ax.set_xticklabels(
+    class_names
+)
+
+ax.set_yticklabels(
+    class_names
+)
+
+ax.set_xlabel(
+    "Predicted class"
+)
+
+ax.set_ylabel(
+    "Actual class"
+)
+
+for row in range(confusion.shape[0]):
+    for column in range(confusion.shape[1]):
+        ax.text(
+            column,
+            row,
+            str(confusion[row, column]),
+            ha="center",
+            va="center"
+        )
+
+fig.colorbar(
+    image,
+    ax=ax
+)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "eagle_confusion_matrix.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# One-vs-rest ROC curves
+
+y_binary = np.eye(
+    len(class_names)
+)[y_true]
+
+fig, ax = plt.subplots(
+    figsize=(7, 5.5)
+)
+
+for index, class_name in enumerate(class_names):
+    false_positive_rate, true_positive_rate, _ = roc_curve(
+        y_binary[:, index],
+        y_prob[:, index]
+    )
+
+    class_auc = auc(
+        false_positive_rate,
+        true_positive_rate
+    )
+
+    ax.plot(
+        false_positive_rate,
+        true_positive_rate,
+        label=f"{class_name} (AUC={class_auc:.3f})"
+    )
+
+ax.plot(
+    [0, 1],
+    [0, 1],
+    linestyle="--",
+    linewidth=1
+)
+
+ax.set_xlabel(
+    "False-positive rate"
+)
+
+ax.set_ylabel(
+    "True-positive rate"
+)
+
+ax.legend(
+    frameon=False
+)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "eagle_roc_curves.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# One-vs-rest precision-recall curves
+
+fig, ax = plt.subplots(
+    figsize=(7, 5.5)
+)
+
+for index, class_name in enumerate(class_names):
+    precision, recall, _ = precision_recall_curve(
+        y_binary[:, index],
+        y_prob[:, index]
+    )
+
+    ax.plot(
+        recall,
+        precision,
+        label=class_name
+    )
+
+ax.set_xlabel(
+    "Recall"
+)
+
+ax.set_ylabel(
+    "Precision"
+)
+
+ax.legend(
+    frameon=False
+)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "eagle_precision_recall_curves.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# Evolutionary feature-selection convergence
+
+mean_history = feature_history.mean(
+    axis=0
+)
+
+std_history = feature_history.std(
+    axis=0
+)
+
+generations = np.arange(
+    1,
+    len(mean_history) + 1
+)
+
+fig, ax = plt.subplots(
+    figsize=(7.5, 5)
+)
+
+ax.plot(
+    generations,
+    mean_history,
+    marker="o"
+)
+
+ax.fill_between(
+    generations,
+    mean_history - std_history,
+    mean_history + std_history,
+    alpha=0.2
+)
+
+ax.set_xlabel(
+    "Generation"
+)
+
+ax.set_ylabel(
+    "Fitness"
+)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "feature_selection_convergence.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# Robustness analysis
+
+fig, ax = plt.subplots(
+    figsize=(7.5, 5)
+)
+
+ax.plot(
+    robustness_results["Noise Level"],
+    robustness_results["Accuracy"],
+    marker="o",
+    label="Accuracy"
+)
+
+ax.plot(
+    robustness_results["Noise Level"],
+    robustness_results["Weighted F1-score"],
+    marker="o",
+    label="Weighted F1-score"
+)
+
+ax.plot(
+    robustness_results["Noise Level"],
+    robustness_results["ROC-AUC"],
+    marker="o",
+    label="ROC-AUC"
+)
+
+ax.set_xlabel(
+    "Gaussian noise standard deviation"
+)
+
+ax.set_ylabel(
+    "Score"
+)
+
+ax.set_ylim(
+    0,
+    1.05
+)
+
+ax.legend(
+    frameon=False
+)
+
+ax.spines["top"].set_visible(False)
+ax.spines["right"].set_visible(False)
+
+fig.tight_layout()
+
+fig.savefig(
+    OUTPUT_DIR / "noise_perturbation_results.png",
+    dpi=600,
+    bbox_inches="tight"
+)
+
+plt.show()
+
+
+# Fold-level statistical comparison
+
+metric_name = "Weighted F1-score"
+
+pivot_table = fold_metrics.pivot_table(
+    index=fold_metrics.groupby("Model").cumcount(),
+    columns="Model",
+    values=metric_name
+)
+
+complete_results = pivot_table.dropna()
+
+friedman_result = friedmanchisquare(
+    *[
+        complete_results[column].to_numpy()
+        for column in complete_results.columns
+    ]
+)
+
+print(
+    f"Friedman statistic: {friedman_result.statistic:.4f}"
+)
+
+print(
+    f"Friedman p-value: {friedman_result.pvalue:.6g}"
+)
+
+reference_model = "EAGLE-Net"
+
+comparisons = []
+
+for model_name in complete_results.columns:
+    if model_name == reference_model:
+        continue
+
+    statistic, p_value = wilcoxon(
+        complete_results[reference_model],
+        complete_results[model_name],
+        zero_method="wilcox",
+        alternative="two-sided"
+    )
+
+    comparisons.append(
+        {
+            "Comparison": (
+                f"{reference_model} vs {model_name}"
+            ),
+            "Wilcoxon statistic": statistic,
+            "Unadjusted p-value": p_value
+        }
+    )
+
+comparison_table = pd.DataFrame(
+    comparisons
+).sort_values(
+    "Unadjusted p-value"
+).reset_index(
+    drop=True
+)
+
+number_of_tests = len(
+    comparison_table
+)
+
+ordered_p_values = comparison_table[
+    "Unadjusted p-value"
+].to_numpy()
+
+holm_adjusted = np.maximum.accumulate(
+    np.minimum(
+        1.0,
+        ordered_p_values
+        * np.arange(
+            number_of_tests,
+            0,
+            -1
+        )
+    )
+)
+
+comparison_table[
+    "Holm-adjusted p-value"
+] = holm_adjusted
+
+display(
+    comparison_table
+)
+
+comparison_table.to_csv(
+    OUTPUT_DIR / "statistical_comparisons.csv",
+    index=False
+)
