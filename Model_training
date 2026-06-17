@@ -1,0 +1,741 @@
+# Model training and evaluation
+
+import os
+import random
+import warnings
+from pathlib import Path
+
+warnings.filterwarnings("ignore")
+
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+
+from sklearn.model_selection import (
+    train_test_split,
+    RepeatedStratifiedKFold
+)
+
+from sklearn.preprocessing import (
+    StandardScaler,
+    LabelEncoder,
+    label_binarize
+)
+
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.utils.class_weight import compute_class_weight
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    matthews_corrcoef,
+    roc_auc_score
+)
+
+from tensorflow.keras.models import Model, Sequential
+
+from tensorflow.keras.layers import (
+    Input,
+    Dense,
+    Dropout,
+    BatchNormalization,
+    GaussianNoise,
+    Conv1D,
+    MaxPooling1D,
+    GlobalAveragePooling1D,
+    MultiHeadAttention,
+    LayerNormalization,
+    Add,
+    Multiply,
+    Concatenate,
+    Reshape,
+    Lambda
+)
+
+from tensorflow.keras.callbacks import EarlyStopping
+
+
+SEED = 42
+
+ANOVA_POOL = 500
+FINAL_FEATURES = 64
+
+POPULATION_SIZE = 30
+GENERATIONS = 25
+MUTATION_RATE = 0.10
+REDUNDANCY_PENALTY = 0.10
+
+GAUSSIAN_NOISE_SD = 0.01
+
+N_SPLITS = 5
+N_REPEATS = 2
+
+EPOCHS = 50
+BATCH_SIZE = 32
+EARLY_STOPPING_PATIENCE = 10
+
+PATCH_SIZE = 8
+
+np.random.seed(SEED)
+random.seed(SEED)
+tf.random.set_seed(SEED)
+
+DATA_DIR = Path("data")
+OUTPUT_DIR = Path("outputs")
+
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+def locate_dataset_files(root):
+    data_path = None
+    labels_path = None
+
+    for current_root, _, files in os.walk(root):
+        for filename in files:
+            if filename.lower() == "data.csv":
+                data_path = Path(current_root) / filename
+            elif filename.lower() == "labels.csv":
+                labels_path = Path(current_root) / filename
+
+    return data_path, labels_path
+
+
+data_path, labels_path = locate_dataset_files(DATA_DIR)
+
+if data_path is None or labels_path is None:
+    raise FileNotFoundError(
+        "Run 01_data_exploration.ipynb before training."
+    )
+
+data = pd.read_csv(data_path)
+labels = pd.read_csv(labels_path)
+
+X = data.drop(columns=[data.columns[0]])
+y = labels["Class"] if "Class" in labels.columns else labels.iloc[:, -1]
+
+label_encoder = LabelEncoder()
+y_encoded = label_encoder.fit_transform(y)
+
+class_names = label_encoder.classes_
+num_classes = len(class_names)
+
+X_np = X.to_numpy()
+y_np = y_encoded
+
+
+def calculate_metrics(y_true, y_prob, model_name):
+    y_pred = np.argmax(y_prob, axis=1)
+
+    y_binary = label_binarize(
+        y_true,
+        classes=np.arange(num_classes)
+    )
+
+    try:
+        auc_score = roc_auc_score(
+            y_binary,
+            y_prob,
+            average="weighted",
+            multi_class="ovr"
+        )
+    except ValueError:
+        auc_score = np.nan
+
+    return {
+        "Model": model_name,
+        "Accuracy": accuracy_score(y_true, y_pred),
+        "Precision": precision_score(
+            y_true,
+            y_pred,
+            average="weighted",
+            zero_division=0
+        ),
+        "Recall": recall_score(
+            y_true,
+            y_pred,
+            average="weighted",
+            zero_division=0
+        ),
+        "Macro F1-score": f1_score(
+            y_true,
+            y_pred,
+            average="macro",
+            zero_division=0
+        ),
+        "Weighted F1-score": f1_score(
+            y_true,
+            y_pred,
+            average="weighted",
+            zero_division=0
+        ),
+        "Balanced Accuracy": balanced_accuracy_score(
+            y_true,
+            y_pred
+        ),
+        "MCC": matthews_corrcoef(
+            y_true,
+            y_pred
+        ),
+        "ROC-AUC": auc_score
+    }
+
+
+def evolutionary_feature_selection(
+    X_train,
+    y_train
+):
+    selector = SelectKBest(
+        score_func=f_classif,
+        k=ANOVA_POOL
+    )
+
+    X_pool = selector.fit_transform(
+        X_train,
+        y_train
+    )
+
+    raw_scores = selector.scores_[
+        selector.get_support()
+    ]
+
+    raw_scores = np.nan_to_num(raw_scores)
+
+    normalised_scores = (
+        raw_scores - raw_scores.min()
+    ) / (
+        raw_scores.max() - raw_scores.min() + 1e-8
+    )
+
+    correlation = np.corrcoef(X_pool.T)
+    correlation = np.nan_to_num(
+        np.abs(correlation)
+    )
+
+    def create_individual():
+        return np.sort(
+            np.random.choice(
+                ANOVA_POOL,
+                FINAL_FEATURES,
+                replace=False
+            )
+        )
+
+    def fitness(individual):
+        discrimination = np.mean(
+            normalised_scores[individual]
+        )
+
+        subset_correlation = correlation[
+            np.ix_(individual, individual)
+        ]
+
+        redundancy = (
+            np.sum(subset_correlation) - FINAL_FEATURES
+        ) / (
+            FINAL_FEATURES * (FINAL_FEATURES - 1) + 1e-8
+        )
+
+        return (
+            discrimination
+            - REDUNDANCY_PENALTY * redundancy
+        )
+
+    def crossover(parent_1, parent_2):
+        combined = np.unique(
+            np.concatenate(
+                [parent_1, parent_2]
+            )
+        )
+
+        if len(combined) >= FINAL_FEATURES:
+            child = np.random.choice(
+                combined,
+                FINAL_FEATURES,
+                replace=False
+            )
+        else:
+            available = np.setdiff1d(
+                np.arange(ANOVA_POOL),
+                combined
+            )
+
+            additional = np.random.choice(
+                available,
+                FINAL_FEATURES - len(combined),
+                replace=False
+            )
+
+            child = np.concatenate(
+                [combined, additional]
+            )
+
+        return np.sort(child)
+
+    def mutate(individual):
+        individual = individual.copy()
+
+        if np.random.rand() < MUTATION_RATE:
+            position = np.random.randint(
+                0,
+                FINAL_FEATURES
+            )
+
+            available = np.setdiff1d(
+                np.arange(ANOVA_POOL),
+                individual
+            )
+
+            individual[position] = np.random.choice(
+                available
+            )
+
+            individual = np.sort(individual)
+
+        return individual
+
+    population = [
+        create_individual()
+        for _ in range(POPULATION_SIZE)
+    ]
+
+    history = []
+
+    for _ in range(GENERATIONS):
+        scores = np.array(
+            [fitness(individual) for individual in population]
+        )
+
+        history.append(scores.max())
+
+        elite_indices = np.argsort(
+            scores
+        )[::-1][:4]
+
+        elites = [
+            population[index]
+            for index in elite_indices
+        ]
+
+        next_population = elites.copy()
+
+        while len(next_population) < POPULATION_SIZE:
+            parent_1, parent_2 = random.sample(
+                elites,
+                2
+            )
+
+            child = crossover(
+                parent_1,
+                parent_2
+            )
+
+            child = mutate(child)
+
+            next_population.append(child)
+
+        population = next_population
+
+    final_scores = np.array(
+        [fitness(individual) for individual in population]
+    )
+
+    best_features = population[
+        np.argmax(final_scores)
+    ]
+
+    return selector, best_features, history
+
+
+def build_eagle_net(input_dim):
+    input_layer = Input(
+        shape=(input_dim,),
+        name="gene_expression_input"
+    )
+
+    regularised = GaussianNoise(
+        GAUSSIAN_NOISE_SD
+    )(input_layer)
+
+    number_of_tokens = input_dim // PATCH_SIZE
+    embedding_dimension = 64
+
+    tokens = Dense(
+        number_of_tokens * embedding_dimension
+    )(regularised)
+
+    tokens = Reshape(
+        (number_of_tokens, embedding_dimension)
+    )(tokens)
+
+    gate = Dense(
+        embedding_dimension,
+        activation="sigmoid"
+    )(tokens)
+
+    gated_tokens = Multiply()(
+        [tokens, gate]
+    )
+
+    attention = MultiHeadAttention(
+        num_heads=4,
+        key_dim=32
+    )(
+        gated_tokens,
+        gated_tokens
+    )
+
+    attention = LayerNormalization()(
+        Add()(
+            [gated_tokens, attention]
+        )
+    )
+
+    feed_forward = Dense(
+        128,
+        activation="relu"
+    )(attention)
+
+    feed_forward = Dense(
+        embedding_dimension
+    )(feed_forward)
+
+    attention = LayerNormalization()(
+        Add()(
+            [attention, feed_forward]
+        )
+    )
+
+    attention_branch = GlobalAveragePooling1D()(
+        attention
+    )
+
+    attention_branch = Dense(
+        128,
+        activation="relu"
+    )(attention_branch)
+
+    cnn_input = Reshape(
+        (input_dim, 1)
+    )(regularised)
+
+    convolution_1 = Conv1D(
+        32,
+        5,
+        padding="same",
+        activation="relu"
+    )(cnn_input)
+
+    convolution_1 = BatchNormalization()(
+        convolution_1
+    )
+
+    convolution_2 = Conv1D(
+        32,
+        5,
+        padding="same",
+        activation="relu"
+    )(convolution_1)
+
+    convolution_2 = BatchNormalization()(
+        convolution_2
+    )
+
+    residual = Add()(
+        [convolution_1, convolution_2]
+    )
+
+    residual = MaxPooling1D(2)(
+        residual
+    )
+
+    residual = Conv1D(
+        64,
+        3,
+        padding="same",
+        activation="relu"
+    )(residual)
+
+    cnn_branch = GlobalAveragePooling1D()(
+        residual
+    )
+
+    cnn_branch = Dense(
+        128,
+        activation="relu"
+    )(cnn_branch)
+
+    dense_branch = Dense(
+        256,
+        activation="relu"
+    )(regularised)
+
+    dense_branch = BatchNormalization()(
+        dense_branch
+    )
+
+    dense_branch = Dropout(
+        0.35
+    )(dense_branch)
+
+    dense_branch = Dense(
+        128,
+        activation="relu"
+    )(dense_branch)
+
+    branches = [
+        attention_branch,
+        cnn_branch,
+        dense_branch
+    ]
+
+    concatenated = Concatenate()(
+        branches
+    )
+
+    branch_weights = Dense(
+        len(branches),
+        activation="softmax"
+    )(concatenated)
+
+    weighted_branches = []
+
+    for index, branch in enumerate(branches):
+        weight = Lambda(
+            lambda values, i=index:
+            tf.expand_dims(values[:, i], axis=-1)
+        )(branch_weights)
+
+        weighted_branch = Multiply()(
+            [branch, weight]
+        )
+
+        weighted_branches.append(
+            weighted_branch
+        )
+
+    fused = Add()(
+        weighted_branches
+    )
+
+    fused = Dense(
+        256,
+        activation="relu"
+    )(fused)
+
+    fused = BatchNormalization()(
+        fused
+    )
+
+    fused = Dropout(
+        0.40
+    )(fused)
+
+    fused = Dense(
+        128,
+        activation="relu"
+    )(fused)
+
+    fused = Dropout(
+        0.30
+    )(fused)
+
+    output_layer = Dense(
+        num_classes,
+        activation="softmax"
+    )(fused)
+
+    model = Model(
+        input_layer,
+        output_layer,
+        name="EAGLE_Net"
+    )
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=0.001
+        ),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+
+    return model
+
+
+cross_validation = RepeatedStratifiedKFold(
+    n_splits=N_SPLITS,
+    n_repeats=N_REPEATS,
+    random_state=SEED
+)
+
+fold_results = []
+feature_selection_history = []
+all_true_labels = []
+all_probabilities = []
+
+for fold_number, (train_index, test_index) in enumerate(
+    cross_validation.split(X_np, y_np),
+    start=1
+):
+    print(
+        f"Fold {fold_number}/{N_SPLITS * N_REPEATS}"
+    )
+
+    X_train_raw = X_np[train_index]
+    X_test_raw = X_np[test_index]
+
+    y_train = y_np[train_index]
+    y_test = y_np[test_index]
+
+    (
+        X_train_inner,
+        X_validation,
+        y_train_inner,
+        y_validation
+    ) = train_test_split(
+        X_train_raw,
+        y_train,
+        test_size=0.20,
+        random_state=SEED,
+        stratify=y_train
+    )
+
+    scaler = StandardScaler()
+
+    X_train_scaled = scaler.fit_transform(
+        X_train_inner
+    )
+
+    X_validation_scaled = scaler.transform(
+        X_validation
+    )
+
+    X_test_scaled = scaler.transform(
+        X_test_raw
+    )
+
+    selector, selected_features, history = (
+        evolutionary_feature_selection(
+            X_train_scaled,
+            y_train_inner
+        )
+    )
+
+    feature_selection_history.append(
+        history
+    )
+
+    X_train_pool = selector.transform(
+        X_train_scaled
+    )
+
+    X_validation_pool = selector.transform(
+        X_validation_scaled
+    )
+
+    X_test_pool = selector.transform(
+        X_test_scaled
+    )
+
+    X_train_selected = X_train_pool[
+        :,
+        selected_features
+    ]
+
+    X_validation_selected = X_validation_pool[
+        :,
+        selected_features
+    ]
+
+    X_test_selected = X_test_pool[
+        :,
+        selected_features
+    ]
+
+    classes = np.unique(
+        y_train_inner
+    )
+
+    weights = compute_class_weight(
+        class_weight="balanced",
+        classes=classes,
+        y=y_train_inner
+    )
+
+    class_weight = {
+        int(class_id): float(weight)
+        for class_id, weight in zip(
+            classes,
+            weights
+        )
+    }
+
+    model = build_eagle_net(
+        FINAL_FEATURES
+    )
+
+    early_stopping = EarlyStopping(
+        monitor="val_loss",
+        patience=EARLY_STOPPING_PATIENCE,
+        restore_best_weights=True
+    )
+
+    model.fit(
+        X_train_selected,
+        y_train_inner,
+        validation_data=(
+            X_validation_selected,
+            y_validation
+        ),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        class_weight=class_weight,
+        callbacks=[early_stopping],
+        verbose=0
+    )
+
+    probabilities = model.predict(
+        X_test_selected,
+        verbose=0
+    )
+
+    fold_results.append(
+        calculate_metrics(
+            y_test,
+            probabilities,
+            "EAGLE-Net"
+        )
+    )
+
+    all_true_labels.extend(
+        y_test.tolist()
+    )
+
+    all_probabilities.append(
+        probabilities
+    )
+
+fold_metrics = pd.DataFrame(
+    fold_results
+)
+
+fold_metrics.to_csv(
+    OUTPUT_DIR / "fold_metrics.csv",
+    index=False
+)
+
+np.save(
+    OUTPUT_DIR / "feature_selection_history.npy",
+    np.asarray(feature_selection_history)
+)
+
+np.savez_compressed(
+    OUTPUT_DIR / "eagle_predictions.npz",
+    y_true=np.asarray(all_true_labels),
+    y_prob=np.vstack(all_probabilities),
+    class_names=np.asarray(class_names)
+)
+
+display(fold_metrics)
