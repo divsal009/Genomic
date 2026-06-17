@@ -1,8 +1,8 @@
 # EAGLE-Net for RNA-Seq Cancer-Type Classification
 
-This repository contains the code used for the EAGLE-Net experiments on RNA-Seq cancer-type classification.
+This repository contains the code used for the EAGLE-Net RNA-Seq cancer-classification experiments.
 
-The experiments use the UCI Gene Expression Cancer RNA-Seq dataset, which contains 801 tumour samples, 20,531 gene-expression features and five cancer classes: BRCA, COAD, KIRC, LUAD and PRAD.
+The analysis uses the UCI Gene Expression Cancer RNA-Seq dataset, containing 801 tumour samples, 20,531 gene-expression features and five cancer classes: BRCA, COAD, KIRC, LUAD and PRAD.
 
 Dataset source:
 https://archive.ics.uci.edu/dataset/401/gene+expression+cancer+rna+seq
@@ -12,29 +12,29 @@ https://archive.ics.uci.edu/static/public/401/gene+expression+cancer+rna+seq.zip
 
 ## Implementation
 
-The code loads the RNA-Seq expression matrix, removes the sample identifier column, encodes the class labels and creates repeated stratified cross-validation splits.
+The code loads the expression matrix, removes the sample identifier column, encodes the class labels and creates repeated stratified cross-validation splits.
 
-Preprocessing and feature selection are carried out separately within each training fold. Standardisation parameters are fitted on the training data and then applied to the validation and held-out data.
+Preprocessing and feature selection are carried out independently within each training fold. Standardisation is fitted on the training data and applied unchanged to the corresponding validation and held-out data.
 
-ANOVA ranking is used to reduce the original feature space. The highest-ranked genes form the candidate pool for evolutionary selection. A compact subset is then selected using a fitness function based on class discrimination and pairwise feature redundancy.
+ANOVA ranking is used to reduce the original feature space. The highest-ranked genes are retained as candidates for evolutionary selection. The evolutionary search then selects a compact subset using class-discriminative scores and a penalty for correlated features.
 
-EAGLE-Net contains three parallel branches: a gated gene-token attention branch, a residual one-dimensional convolutional branch and a dense branch. Their outputs are combined using learned fusion weights before softmax classification.
+EAGLE-Net contains three parallel branches: gated gene-token attention, residual one-dimensional convolution and dense feature processing. The resulting representations are combined using learned fusion weights and passed to a softmax classification layer.
 
 ## Experimental design
 
 The experiments use five-fold stratified cross-validation repeated twice, giving ten held-out evaluations. An internal validation split is used for early stopping.
 
-The default configuration retains 500 ANOVA-ranked genes and selects 64 genes through evolutionary optimisation. The evolutionary search uses a population size of 30, 25 generations, set-based crossover, elitism, a mutation probability of 0.10 and a redundancy penalty of 0.10.
+The default configuration retains 500 ANOVA-ranked genes and selects 64 features. The evolutionary search uses a population size of 30, 25 generations, set-based crossover, elitism, a mutation probability of 0.10 and a redundancy penalty of 0.10.
 
-The model is trained using Adam with a learning rate of 0.001, a batch size of 32 and a maximum of 50 epochs. Early stopping is based on validation loss with a patience of 10 epochs. Gaussian noise, dropout, batch normalisation and class-weighted categorical cross-entropy are used during training.
+Training uses Adam with a learning rate of 0.001, a batch size of 32 and a maximum of 50 epochs. Early stopping monitors validation loss with a patience of 10 epochs. Gaussian noise, dropout, batch normalisation and class-weighted categorical cross-entropy are used during training.
 
-The repository also contains the comparator models and ablation variants used in the experiments.
+The repository also contains the comparator models and ablation configurations used in the experiments.
 
 ## Evaluation
 
-The evaluation reports accuracy, precision, recall, macro F1-score, weighted F1-score, balanced accuracy, Matthews correlation coefficient and ROC-AUC.
+The code calculates accuracy, precision, recall, macro F1-score, weighted F1-score, balanced accuracy, Matthews correlation coefficient and ROC-AUC. Results are summarised across the ten held-out folds.
 
-The code also produces confusion matrices, ROC and precision-recall curves, training curves, ablation results, Gaussian-noise experiments and computational-cost measurements.
+The notebook also produces confusion matrices, ROC and precision-recall curves, training curves, ablation results, Gaussian-noise experiments and computational-cost measurements.
 
 ## Software environment
 
